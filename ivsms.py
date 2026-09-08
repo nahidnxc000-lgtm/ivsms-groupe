@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+"""
+IVA SMS Forwarder Bot - Full Working Version
+"""
 import os
 import json
 import logging
@@ -19,13 +22,14 @@ LOGIN_URL    = f"{BASE_URL}/login"
 SMS_LIVE_URL = f"{BASE_URL}/portal/client/active_sms"
 
 DB_SEEN_SMS = "db_seen_sms.json"
-MONITOR_INTERVAL = 3.0
+MONITOR_INTERVAL = 4.0
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(message)s")
 logger = logging.getLogger()
 
 global_seen = set()
 
+# ==================== DATABASE ====================
 def load_seen():
     global global_seen
     if os.path.exists(DB_SEEN_SMS):
@@ -42,46 +46,60 @@ def save_seen():
     except Exception as e:
         logger.error(f"DB Save Error: {e}")
 
+# ==================== CLOUDSCRAPER SESSION ====================
 class IVASession:
     def __init__(self):
         self.scraper = cloudscraper.create_scraper(
-            browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True}
+            browser={
+                'browser': 'chrome',
+                'platform': 'windows',
+                'desktop': True
+            }
         )
+        self.scraper.headers.update({
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Referer': LOGIN_URL
+        })
 
     def login(self):
         try:
             logger.info("🔑 Logging into IVA SMS...")
+            
+            # ১. পেজ লোড করে CSRF এবং ফর্মের সব ইনপুট সংগ্রহ
             res = self.scraper.get(LOGIN_URL, timeout=20)
             soup = BeautifulSoup(res.text, 'html.parser')
             
-            csrf_token = None
-            token_input = soup.find('input', {'name': '_token'})
-            if token_input:
-                csrf_token = token_input.get('value')
+            payload = {}
+            for input_tag in soup.find_all('input'):
+                name = input_tag.get('name')
+                value = input_tag.get('value', '')
+                if name:
+                    payload[name] = value
 
-            payload = {
-                "email": MASTER_EMAIL,
-                "password": MASTER_PASSWORD
-            }
-            if csrf_token:
-                payload["_token"] = csrf_token
+            payload['email'] = MASTER_EMAIL
+            payload['password'] = MASTER_PASSWORD
 
+            # ২. ফর্ম সাবমিট
             login_res = self.scraper.post(LOGIN_URL, data=payload, timeout=20)
             
-            # লগইন সফল কি না তা চেক
+            # ৩. লগইন রেজাল্ট ভেরিফাই
             if "login" not in login_res.url.lower() or login_res.status_code == 200:
                 logger.info("✅ Login successful!")
                 return True, "Success"
             else:
-                return False, f"Redirected to {login_res.url}"
+                return False, f"Redirected back to {login_res.url}"
         except Exception as e:
+            logger.error(f"Login Exception: {e}")
             return False, str(e)
 
     def fetch_sms(self):
         try:
             res = self.scraper.get(SMS_LIVE_URL, timeout=20)
             
+            # সেশন আউট হয়ে গেলে অটো রি-লগইন
             if "login" in res.url.lower():
+                logger.warning("Session expired! Re-logging in...")
                 status, msg = self.login()
                 if status:
                     res = self.scraper.get(SMS_LIVE_URL, timeout=20)
@@ -100,7 +118,7 @@ class IVASession:
                 row_data = [td.text.strip().replace('\n', ' ') for td in tds]
                 full_text = " | ".join(row_data)
                 
-                uid = hash(full_text)
+                uid = str(hash(full_text))
                 results.append({
                     'id': uid,
                     'full_text': full_text
@@ -109,38 +127,34 @@ class IVASession:
         except Exception as e:
             return [], str(e)
 
+# ==================== CORE MONITOR ENGINE ====================
 async def monitor_account_task(app: Application):
     iva_session = IVASession()
     status, msg = await asyncio.to_thread(iva_session.login)
     
     if not status:
-        # লগইন ফেইল হলে টেলিগ্রামে সতর্কবার্তা পাঠাবে
         try:
             await app.bot.send_message(
                 chat_id=GROUP_CHAT_ID,
                 text=f"⚠️ <b>IVASMS Login Failed!</b>\nReason: <code>{msg}</code>",
                 parse_mode="HTML"
             )
-        except Exception:
-            pass
+        except Exception as err:
+            logger.error(f"Telegram Alert Error: {err}")
 
     while True:
         try:
             new_sms_list, err_msg = await asyncio.to_thread(iva_session.fetch_sms)
             
-            if err_msg != "OK" and "Re-login failed" in err_msg:
-                logger.error(f"Fetch Error: {err_msg}")
-            
             for sms in new_sms_list:
                 if sms['id'] not in global_seen:
                     global_seen.add(sms['id'])
                     save_seen()
+                    logger.info("📩 New SMS Found! Forwarding...")
                     
                     text = (
-                        f"📩 <b>New IVA SMS Received!</b>\n"
-                        f"━━━━━━━━━━━━━━━━━━\n"
-                        f"<code>{sms['full_text']}</code>\n"
-                        f"━━━━━━━━━━━━━━━━━━"
+                        f"🎯 <b>SMS RECEIVED IN YOUR NUMBER!</b>\n\n"
+                        f"💬 <code>{sms['full_text']}</code>"
                     )
                     
                     try:
@@ -157,12 +171,14 @@ async def monitor_account_task(app: Application):
 
         await asyncio.sleep(MONITOR_INTERVAL)
 
+# ==================== COMMANDS ====================
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ IVA SMS Bot Active!")
 
 async def post_init(application: Application):
     asyncio.create_task(monitor_account_task(application))
 
+# ==================== MAIN ENTRY ====================
 if __name__ == "__main__":
     load_seen()
     
