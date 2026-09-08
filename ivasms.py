@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Simple IVA SMS Forwarder Bot for Railway
+IVA SMS Forwarder Bot (Client Active SMS Version)
 """
 import os
 import json
@@ -19,10 +19,11 @@ GROUP_CHAT_ID   = -1003919009698
 
 BASE_URL     = "https://www.ivasms.com"
 LOGIN_URL    = f"{BASE_URL}/login"
-SMS_LIVE_URL = f"{BASE_URL}/portal/live/my_sms"
+# আপনার স্ক্রিনশটের আসল Client Active SMS URL
+SMS_LIVE_URL = f"{BASE_URL}/portal/client/active_sms"
 
 DB_SEEN_SMS = "db_seen_sms.json"
-MONITOR_INTERVAL = 3.0
+MONITOR_INTERVAL = 4.0
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(message)s")
 logger = logging.getLogger()
@@ -86,7 +87,8 @@ class IVASession:
     def fetch_sms(self):
         try:
             res = self.session.get(SMS_LIVE_URL, timeout=15)
-            # অটো-লগইন চেক: যদি লগআউট হয়ে লগইন পেজে নিয়ে যায়
+            
+            # অটো লগআউট হয়ে গেলে পুনরায় লগইন করার চেষ্টা
             if "login" in res.url.lower():
                 logger.warning("Session expired! Re-logging in automatically...")
                 if self.login():
@@ -95,7 +97,9 @@ class IVASession:
                     return []
 
             soup = BeautifulSoup(res.text, 'html.parser')
-            rows = soup.select('#LiveTestSMS tbody tr, #LiveTestSMS tr')
+            
+            # পেজের যেকোনো টেবিলের tr স্ক্র্যাপ করবে
+            rows = soup.select('table tbody tr')
             results = []
             
             for row in rows:
@@ -103,22 +107,16 @@ class IVASession:
                 if len(tds) < 3:
                     continue
                 
-                recipient = tds[0].find('p').text.strip() if tds[0].find('p') else tds[0].text.strip()
-                sender = tds[1].text.strip() if len(tds) > 1 else 'N/A'
+                # কলাম ম্যাপিং
+                recipient = tds[0].text.strip()
+                sender    = tds[1].text.strip() if len(tds) > 1 else 'N/A'
+                message   = tds[-1].text.strip() if len(tds) > 2 else ''
                 
-                sid_service = ''
-                if len(tds) > 2:
-                    sid_elem = tds[2].find(class_='fw-semi-bold')
-                    sid_service = sid_elem.text.strip() if sid_elem else tds[2].text.strip()
-                
-                message = tds[4].text.strip() if len(tds) > 4 else (tds[3].text.strip() if len(tds) > 3 else tds[2].text.strip())
-                
-                if recipient or message:
+                if recipient and message:
                     results.append({
-                        'recipient': recipient,
-                        'sender': sender,
-                        'message': message,
-                        'sid_service': sid_service
+                        'recipient': recipient.replace('\n', ' '),
+                        'sender': sender.replace('\n', ' '),
+                        'message': message.replace('\n', ' ')
                     })
             return results
         except Exception as e:
@@ -134,20 +132,19 @@ async def monitor_account_task(app: Application):
         try:
             new_sms_list = await asyncio.to_thread(iva_session.fetch_sms)
             for sms in new_sms_list:
-                uid = f"{sms['recipient']}_{sms['sender']}_{sms['message']}"
+                uid = f"{sms['recipient']}_{sms['message']}"
                 if uid not in global_seen:
                     global_seen.add(uid)
                     save_seen()
-                    logger.info(f"📩 New SMS: {sms['recipient']} - {sms['sender']}")
+                    logger.info(f"📩 New SMS: {sms['recipient']}")
                     
-                    # টেলিগ্রামে সরাসরি ফুল মেসেজ ফরওয়ার্ড
+                    # ফরওয়ার্ড মেসেজ ফরম্যাট
                     text = (
-                        f"📱 <b>New SMS Received</b>\n"
+                        f"📩 <b>New SMS Received!</b>\n"
                         f"━━━━━━━━━━━━━━━━━━\n"
-                        f"📞 <b>Number:</b> <code>{sms['recipient']}</code>\n"
-                        f"👤 <b>Sender:</b> {sms['sender']}\n"
-                        f"⚙️ <b>Service:</b> {sms['sid_service']}\n"
-                        f"💬 <b>Message:</b>\n<code>{sms['message']}</code>\n"
+                        f"📞 <b>Number/Country:</b>\n<code>{sms['recipient']}</code>\n\n"
+                        f"⚙️ <b>Service/SID:</b> {sms['sender']}\n\n"
+                        f"💬 <b>Message Content:</b>\n<code>{sms['message']}</code>\n"
                         f"━━━━━━━━━━━━━━━━━━"
                     )
                     
@@ -167,7 +164,7 @@ async def monitor_account_task(app: Application):
 
 # ==================== COMMANDS ====================
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ IVA SMS Forwarder Bot is Active and Running!")
+    await update.message.reply_text("✅ IVA SMS Forwarder Bot is Active!")
 
 async def post_init(application: Application):
     asyncio.create_task(monitor_account_task(application))
