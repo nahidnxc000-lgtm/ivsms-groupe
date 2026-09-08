@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Single-Account SMS Monitoring Bot - OPTIMIZED LIGHTWEIGHT VERSION (IVA)
-No Chrome/Selenium required. Uses fast Python HTTP Requests.
+Single-Account SMS Monitoring Bot - PRO LIGHTWEIGHT VERSION (IVA)
+Optimized for Railway Free Tier (No Selenium/Chrome, No Thread Loop Crashes)
 """
 import os
 import json
@@ -9,12 +9,9 @@ import logging
 import asyncio
 import re
 import requests
-import threading
-import traceback
 from bs4 import BeautifulSoup
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
-from telegram.error import BadRequest
 
 # ==================== CONFIGURATION ====================
 MASTER_EMAIL    = "nahidnxc000@gmail.com"
@@ -61,7 +58,6 @@ DEFAULT_COUNTRY_MAP = {
     "UNKNOWN": "5281027792148909351",
 }
 
-# Condensed Country & Alpha Code Mapping (Memory Efficient)
 COUNTRY_MAP = {
     "1": ("USA/Canada", "US"), "7": ("Russia/Kazakhstan", "RU"), "20": ("Egypt", "EG"),
     "33": ("France", "FR"), "44": ("United Kingdom", "GB"), "49": ("Germany", "DE"),
@@ -89,9 +85,12 @@ def load_databases():
             except Exception: pass
 
 def save_databases():
-    with open(DB_SEEN_SMS, "w") as f: json.dump(list(global_seen), f)
-    with open(DB_STATUS, "w") as f: json.dump({"active": bot_active}, f)
-    with open(DB_OTP_STATS, "w") as f: json.dump(otp_counter, f, indent=2)
+    try:
+        with open(DB_SEEN_SMS, "w") as f: json.dump(list(global_seen), f)
+        with open(DB_STATUS, "w") as f: json.dump({"active": bot_active}, f)
+        with open(DB_OTP_STATS, "w") as f: json.dump(otp_counter, f, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving database: {e}")
 
 # ==================== HTTP SESSION MANAGER ====================
 class IVASession:
@@ -104,10 +103,9 @@ class IVASession:
     def login(self):
         try:
             logger.info("🔑 Logging in via HTTP POST...")
-            res = self.session.get(LOGIN_URL)
+            res = self.session.get(LOGIN_URL, timeout=15)
             soup = BeautifulSoup(res.text, 'html.parser')
             
-            # Extract CSRF token if present
             csrf_token = None
             token_input = soup.find('input', {'name': '_token'})
             if token_input:
@@ -120,7 +118,7 @@ class IVASession:
             if csrf_token:
                 payload["_token"] = csrf_token
 
-            login_res = self.session.post(LOGIN_URL, data=payload)
+            login_res = self.session.post(LOGIN_URL, data=payload, timeout=15)
             if "/portal" in login_res.url or login_res.status_code == 200:
                 logger.info("✅ Login successful via Requests!")
                 return True
@@ -133,11 +131,11 @@ class IVASession:
 
     def fetch_sms(self):
         try:
-            res = self.session.get(SMS_LIVE_URL)
+            res = self.session.get(SMS_LIVE_URL, timeout=15)
             if "login" in res.url.lower():
                 logger.warning("Session expired. Re-logging in...")
                 if self.login():
-                    res = self.session.get(SMS_LIVE_URL)
+                    res = self.session.get(SMS_LIVE_URL, timeout=15)
                 else:
                     return []
 
@@ -171,14 +169,14 @@ class IVASession:
             return []
 
 # ==================== CORE MONITOR ENGINE ====================
-async def monitor_account(bot):
+async def monitor_account_task(app: Application):
+    """Native asyncio task inside Telegram event loop."""
     iva_session = IVASession()
-    if not iva_session.login():
-        logger.error("Initial login failed. Will retry in loop...")
+    await asyncio.to_thread(iva_session.login)
 
     while True:
         try:
-            new_sms_list = iva_session.fetch_sms()
+            new_sms_list = await asyncio.to_thread(iva_session.fetch_sms)
             for sms in new_sms_list:
                 uid = f"{MASTER_EMAIL}_{sms['recipient']}_{sms['sender']}_{sms['message']}"
                 if uid not in global_seen:
@@ -188,7 +186,7 @@ async def monitor_account(bot):
                     logger.info(f"📤 New OTP Found: {sms['recipient']} - {sms['sender']}")
                     
                     asyncio.create_task(deliver_sms(
-                        bot, GROUP_CHAT_ID,
+                        app.bot, GROUP_CHAT_ID,
                         sms["recipient"], sms["sender"],
                         sms["message"], sms.get("sid_service", "")
                     ))
@@ -282,17 +280,21 @@ async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
     del admin_states[user_id]
     await update.message.reply_text(f"✅ Saved <b>{name}</b> with Emoji ID <code>{emoji_id}</code>.", parse_mode="HTML")
 
+# ==================== POST INIT HOOK ====================
+async def post_init(application: Application):
+    """Starts the background monitoring task using Telegram's loop."""
+    asyncio.create_task(monitor_account_task(application))
+
 # ==================== MAIN ENTRY ====================
 if __name__ == "__main__":
     load_databases()
-    app = Application.builder().token(BOT_TOKEN).build()
+    
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     
     app.add_handler(CommandHandler("start", admin_panel))
     app.add_handler(CommandHandler("admin", admin_panel))
     app.add_handler(CallbackQueryHandler(admin_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_message_handler))
 
-    threading.Thread(target=lambda: asyncio.run(monitor_account(app.bot)), daemon=True).start()
-
-    logger.info("🚀 IVA SMS Lightweight Bot started.")
+    logger.info("🚀 IVA SMS Lightweight Bot starting...")
     app.run_polling(close_loop=True)
