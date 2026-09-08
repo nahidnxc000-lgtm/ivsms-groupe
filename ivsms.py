@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-"""
-IVA SMS Forwarder Bot
-"""
 import os
 import json
 import logging
@@ -29,7 +26,6 @@ logger = logging.getLogger()
 
 global_seen = set()
 
-# ==================== DATABASE ====================
 def load_seen():
     global global_seen
     if os.path.exists(DB_SEEN_SMS):
@@ -46,7 +42,6 @@ def save_seen():
     except Exception as e:
         logger.error(f"DB Save Error: {e}")
 
-# ==================== CLOUDSCRAPER SESSION ====================
 class IVASession:
     def __init__(self):
         self.scraper = cloudscraper.create_scraper(
@@ -73,26 +68,25 @@ class IVASession:
 
             login_res = self.scraper.post(LOGIN_URL, data=payload, timeout=20)
             
+            # লগইন সফল কি না তা চেক
             if "login" not in login_res.url.lower() or login_res.status_code == 200:
                 logger.info("✅ Login successful!")
-                return True
+                return True, "Success"
             else:
-                logger.error(f"❌ Login failed. URL: {login_res.url}")
-                return False
+                return False, f"Redirected to {login_res.url}"
         except Exception as e:
-            logger.error(f"Login Exception: {e}")
-            return False
+            return False, str(e)
 
     def fetch_sms(self):
         try:
             res = self.scraper.get(SMS_LIVE_URL, timeout=20)
             
             if "login" in res.url.lower():
-                logger.warning("Session expired! Re-logging in...")
-                if self.login():
+                status, msg = self.login()
+                if status:
                     res = self.scraper.get(SMS_LIVE_URL, timeout=20)
                 else:
-                    return []
+                    return [], f"Re-login failed: {msg}"
 
             soup = BeautifulSoup(res.text, 'html.parser')
             rows = soup.find_all('tr')
@@ -103,35 +97,44 @@ class IVASession:
                 if len(tds) < 2:
                     continue
                 
-                # টেবিলের সম্পূর্ণ তথ্য এক লাইনে ফরম্যাট করা
                 row_data = [td.text.strip().replace('\n', ' ') for td in tds]
                 full_text = " | ".join(row_data)
                 
-                # ইউনিক আইডি তৈরি (ডুপ্লিকেট মেসেজ এড়াতে)
                 uid = hash(full_text)
-                
                 results.append({
                     'id': uid,
                     'full_text': full_text
                 })
-            return results
+            return results, "OK"
         except Exception as e:
-            logger.error(f"Fetch SMS Error: {e}")
-            return []
+            return [], str(e)
 
-# ==================== CORE MONITOR ENGINE ====================
 async def monitor_account_task(app: Application):
     iva_session = IVASession()
-    await asyncio.to_thread(iva_session.login)
+    status, msg = await asyncio.to_thread(iva_session.login)
+    
+    if not status:
+        # লগইন ফেইল হলে টেলিগ্রামে সতর্কবার্তা পাঠাবে
+        try:
+            await app.bot.send_message(
+                chat_id=GROUP_CHAT_ID,
+                text=f"⚠️ <b>IVASMS Login Failed!</b>\nReason: <code>{msg}</code>",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
 
     while True:
         try:
-            new_sms_list = await asyncio.to_thread(iva_session.fetch_sms)
+            new_sms_list, err_msg = await asyncio.to_thread(iva_session.fetch_sms)
+            
+            if err_msg != "OK" and "Re-login failed" in err_msg:
+                logger.error(f"Fetch Error: {err_msg}")
+            
             for sms in new_sms_list:
                 if sms['id'] not in global_seen:
                     global_seen.add(sms['id'])
                     save_seen()
-                    logger.info("📩 New SMS Found! Forwarding...")
                     
                     text = (
                         f"📩 <b>New IVA SMS Received!</b>\n"
@@ -154,14 +157,12 @@ async def monitor_account_task(app: Application):
 
         await asyncio.sleep(MONITOR_INTERVAL)
 
-# ==================== COMMANDS ====================
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ IVA SMS Bot Active!")
 
 async def post_init(application: Application):
     asyncio.create_task(monitor_account_task(application))
 
-# ==================== MAIN ENTRY ====================
 if __name__ == "__main__":
     load_seen()
     
