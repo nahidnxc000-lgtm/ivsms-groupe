@@ -1,96 +1,50 @@
 #!/usr/bin/env python3
 """
-Single-Account SMS Monitoring Bot - PRO LIGHTWEIGHT VERSION (IVA)
-Optimized for Railway Free Tier (No Selenium/Chrome, No Thread Loop Crashes)
+Simple IVA SMS Forwarder Bot for Railway
 """
 import os
 import json
 import logging
 import asyncio
-import re
 import requests
 from bs4 import BeautifulSoup
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 # ==================== CONFIGURATION ====================
 MASTER_EMAIL    = "nahidnxc000@gmail.com"
 MASTER_PASSWORD = "Soutafrica11@"
 BOT_TOKEN       = "8632025587:AAFI_QjCBOiO1LF_O3_RnGNIzIzDCXST6pk"
 GROUP_CHAT_ID   = -1003919009698
-ADMIN_IDS       = {6394277892}
 
 BASE_URL     = "https://www.ivasms.com"
 LOGIN_URL    = f"{BASE_URL}/login"
 SMS_LIVE_URL = f"{BASE_URL}/portal/live/my_sms"
 
-DB_SEEN_SMS     = "db_seen_sms.json"
-DB_STATUS       = "db_status.json"
-DB_OTP_STATS    = "db_otp_stats.json"
-DB_COUNTRY_MAP  = "db_country_map.json"
-DB_SERVICE_META = "db_service_meta.json"
-
+DB_SEEN_SMS = "db_seen_sms.json"
 MONITOR_INTERVAL = 3.0
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(message)s")
 logger = logging.getLogger()
 
-global_seen    = set()
-bot_active     = True
-otp_counter    = {}
-admin_states   = {}
+global_seen = set()
 
-# ==================== DEFAULT DATA ====================
-DEFAULT_SERVICE_META = {
-    "facebook":  {"emoji_id": "5323261730283863478", "placeholder": "🔵"},
-    "tiktok":    {"emoji_id": "5327982530702359565", "placeholder": "🎵"},
-    "whatsapp":  {"emoji_id": "5334998226636390258", "placeholder": "🟢"},
-    "telegram":  {"emoji_id": "5319160079465857105", "placeholder": "🔹"},
-    "instagram": {"emoji_id": "5319160079465857105", "placeholder": "📸"},
-    "default":   {"emoji_id": "5346066456142429527", "placeholder": "📱"},
-}
+# ==================== DATABASE ====================
+def load_seen():
+    global global_seen
+    if os.path.exists(DB_SEEN_SMS):
+        try:
+            with open(DB_SEEN_SMS, "r") as f:
+                global_seen = set(json.load(f))
+        except Exception:
+            pass
 
-DEFAULT_COUNTRY_MAP = {
-    "KAZAKHSTAN": "5222276376161171525", "UKRAINE": "5222250679371839695",
-    "TUNISIA": "5221991375016310330",    "PAKISTAN": "5224637061985742245",
-    "MOZAMBIQUE": "5222470388423864826", "NIGERIA": "5224723614166691638",
-    "EGYPT": "5222161185138292290",      "BANGLADESH": "5224407289825340729",
-    "UNKNOWN": "5281027792148909351",
-}
-
-COUNTRY_MAP = {
-    "1": ("USA/Canada", "US"), "7": ("Russia/Kazakhstan", "RU"), "20": ("Egypt", "EG"),
-    "33": ("France", "FR"), "44": ("United Kingdom", "GB"), "49": ("Germany", "DE"),
-    "60": ("Malaysia", "MY"), "62": ("Indonesia", "ID"), "63": ("Philippines", "PH"),
-    "880": ("Bangladesh", "BD"), "91": ("India", "IN"), "92": ("Pakistan", "PK"),
-    "966": ("Saudi Arabia", "SA"), "971": ("UAE", "AE"), "212": ("Morocco", "MA"),
-    "213": ("Algeria", "DZ"), "216": ("Tunisia", "TN"), "234": ("Nigeria", "NG")
-}
-
-# ==================== DATA PERSISTENCE ====================
-def load_databases():
-    global global_seen, bot_active, otp_counter, DEFAULT_COUNTRY_MAP, DEFAULT_SERVICE_META
-    for db_file, target, is_set in [
-        (DB_SEEN_SMS, global_seen, True),
-        (DB_OTP_STATS, otp_counter, False),
-        (DB_COUNTRY_MAP, DEFAULT_COUNTRY_MAP, False),
-        (DB_SERVICE_META, DEFAULT_SERVICE_META, False)
-    ]:
-        if os.path.exists(db_file):
-            try:
-                with open(db_file) as f:
-                    data = json.load(f)
-                    if is_set: target.update(data)
-                    else: target.update(data)
-            except Exception: pass
-
-def save_databases():
+def save_seen():
     try:
-        with open(DB_SEEN_SMS, "w") as f: json.dump(list(global_seen), f)
-        with open(DB_STATUS, "w") as f: json.dump({"active": bot_active}, f)
-        with open(DB_OTP_STATS, "w") as f: json.dump(otp_counter, f, indent=2)
+        with open(DB_SEEN_SMS, "w") as f:
+            json.dump(list(global_seen), f)
     except Exception as e:
-        logger.error(f"Error saving database: {e}")
+        logger.error(f"DB Save Error: {e}")
 
 # ==================== HTTP SESSION MANAGER ====================
 class IVASession:
@@ -102,7 +56,7 @@ class IVASession:
 
     def login(self):
         try:
-            logger.info("🔑 Logging in via HTTP POST...")
+            logger.info("🔑 Logging into IVA SMS...")
             res = self.session.get(LOGIN_URL, timeout=15)
             soup = BeautifulSoup(res.text, 'html.parser')
             
@@ -120,10 +74,10 @@ class IVASession:
 
             login_res = self.session.post(LOGIN_URL, data=payload, timeout=15)
             if "/portal" in login_res.url or login_res.status_code == 200:
-                logger.info("✅ Login successful via Requests!")
+                logger.info("✅ Login successful!")
                 return True
             else:
-                logger.error("❌ Login failed. Check credentials or site response.")
+                logger.error("❌ Login failed. Check credentials.")
                 return False
         except Exception as e:
             logger.error(f"Login Exception: {e}")
@@ -132,8 +86,9 @@ class IVASession:
     def fetch_sms(self):
         try:
             res = self.session.get(SMS_LIVE_URL, timeout=15)
+            # অটো-লগইন চেক: যদি লগআউট হয়ে লগইন পেজে নিয়ে যায়
             if "login" in res.url.lower():
-                logger.warning("Session expired. Re-logging in...")
+                logger.warning("Session expired! Re-logging in automatically...")
                 if self.login():
                     res = self.session.get(SMS_LIVE_URL, timeout=15)
                 else:
@@ -142,12 +97,14 @@ class IVASession:
             soup = BeautifulSoup(res.text, 'html.parser')
             rows = soup.select('#LiveTestSMS tbody tr, #LiveTestSMS tr')
             results = []
+            
             for row in rows:
                 tds = row.find_all('td')
-                if len(tds) < 3: continue
+                if len(tds) < 3:
+                    continue
                 
                 recipient = tds[0].find('p').text.strip() if tds[0].find('p') else tds[0].text.strip()
-                sender = tds[1].text.strip() if len(tds) > 1 else ''
+                sender = tds[1].text.strip() if len(tds) > 1 else 'N/A'
                 
                 sid_service = ''
                 if len(tds) > 2:
@@ -156,7 +113,7 @@ class IVASession:
                 
                 message = tds[4].text.strip() if len(tds) > 4 else (tds[3].text.strip() if len(tds) > 3 else tds[2].text.strip())
                 
-                if recipient:
+                if recipient or message:
                     results.append({
                         'recipient': recipient,
                         'sender': sender,
@@ -170,7 +127,6 @@ class IVASession:
 
 # ==================== CORE MONITOR ENGINE ====================
 async def monitor_account_task(app: Application):
-    """Native asyncio task inside Telegram event loop."""
     iva_session = IVASession()
     await asyncio.to_thread(iva_session.login)
 
@@ -178,123 +134,50 @@ async def monitor_account_task(app: Application):
         try:
             new_sms_list = await asyncio.to_thread(iva_session.fetch_sms)
             for sms in new_sms_list:
-                uid = f"{MASTER_EMAIL}_{sms['recipient']}_{sms['sender']}_{sms['message']}"
+                uid = f"{sms['recipient']}_{sms['sender']}_{sms['message']}"
                 if uid not in global_seen:
                     global_seen.add(uid)
-                    save_databases()
-                    otp_counter[MASTER_EMAIL] = otp_counter.get(MASTER_EMAIL, 0) + 1
-                    logger.info(f"📤 New OTP Found: {sms['recipient']} - {sms['sender']}")
+                    save_seen()
+                    logger.info(f"📩 New SMS: {sms['recipient']} - {sms['sender']}")
                     
-                    asyncio.create_task(deliver_sms(
-                        app.bot, GROUP_CHAT_ID,
-                        sms["recipient"], sms["sender"],
-                        sms["message"], sms.get("sid_service", "")
-                    ))
+                    # টেলিগ্রামে সরাসরি ফুল মেসেজ ফরওয়ার্ড
+                    text = (
+                        f"📱 <b>New SMS Received</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"📞 <b>Number:</b> <code>{sms['recipient']}</code>\n"
+                        f"👤 <b>Sender:</b> {sms['sender']}\n"
+                        f"⚙️ <b>Service:</b> {sms['sid_service']}\n"
+                        f"💬 <b>Message:</b>\n<code>{sms['message']}</code>\n"
+                        f"━━━━━━━━━━━━━━━━━━"
+                    )
+                    
+                    try:
+                        await app.bot.send_message(
+                            chat_id=GROUP_CHAT_ID,
+                            text=text,
+                            parse_mode="HTML"
+                        )
+                    except Exception as send_err:
+                        logger.error(f"Telegram Send Error: {send_err}")
+
         except Exception as e:
             logger.error(f"Monitor Loop Error: {e}")
 
         await asyncio.sleep(MONITOR_INTERVAL)
 
-# ==================== SMS DELIVERY ====================
-async def deliver_sms(bot, chat_id, recipient, sender, message, sid_service=""):
-    try:
-        otp_match = re.search(r'\b\d{3}-\d{3}\b|\b\d{4,8}\b', message)
-        otp = otp_match.group(0) if otp_match else "N/A"
+# ==================== COMMANDS ====================
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("✅ IVA SMS Forwarder Bot is Active and Running!")
 
-        digits = re.sub(r'\D', '', str(recipient))
-        c_name, a2, flag = "Global", "XX", "🌐"
-        for length in range(1, 4):
-            cc = digits[:length]
-            if cc in COUNTRY_MAP:
-                c_name, a2 = COUNTRY_MAP[cc]
-                flag = ''.join(chr(0x1F1E6 + ord(ch) - ord('A')) for ch in a2)
-                break
-
-        svc_raw = sender.strip()
-        svc_key_lookup = svc_raw.lower()
-        matched_svc_key = "default"
-        for key in DEFAULT_SERVICE_META:
-            if key != "default" and key in svc_key_lookup:
-                matched_svc_key = key
-                break
-        service_name = svc_raw if svc_raw else matched_svc_key.upper()
-
-        masked = f"{digits[:5]}****{digits[-4:]}" if len(digits) >= 9 else f"****{digits}"
-
-        text = (
-            f"RCV JIR\n"
-            f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-            f"{flag} ᴄᴏᴜɴᴛʀʏ: {c_name}\n"
-            f"☎️ ɴᴜᴍʙᴇʀ: <code>{masked}</code>\n"
-            f"🛠️ sᴇʀᴠɪᴄᴇ: {service_name.upper()}\n"
-            f"🔑 sʏsᴛᴇᴍ ᴄᴏᴅᴇ: <code>{otp}</code>\n"
-            f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬"
-        )
-
-        keyboard = {
-            "inline_keyboard": [[
-                {"text": "𝐎𝐓𝐏", "copy_text": {"text": str(otp)}},
-                {"text": "𝐁𝐎𝐓 𝐋𝐈𝐍𝐊", "url": "https://t.me/fortestonly99_bot"}
-            ]]
-        }
-
-        await bot.send_message(
-            chat_id=chat_id, text=text, parse_mode="HTML",
-            reply_markup=keyboard, disable_web_page_preview=True
-        )
-        return True
-    except Exception as e:
-        logger.error(f"❌ Delivery Error: {e}")
-        return False
-
-# ==================== ADMIN PANEL ====================
-async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS: return
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🌍 Add Country Emoji", callback_data="add_country")],
-        [InlineKeyboardButton("🛠️ Add Service Emoji", callback_data="add_service")],
-    ])
-    await update.message.reply_text("✨ <b>IVA SMS Admin Control Panel</b>", reply_markup=kb, parse_mode="HTML")
-
-async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if query.from_user.id not in ADMIN_IDS: return
-    await query.answer()
-    if query.data in ["add_country", "add_service"]:
-        admin_states[query.from_user.id] = query.data
-        await query.edit_message_text("Send format: <code>NAME:EMOJI_ID</code>", parse_mode="HTML")
-
-async def admin_message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in ADMIN_IDS or user_id not in admin_states: return
-    txt = update.message.text.strip()
-    if ":" not in txt: return
-    name, emoji_id = [x.strip() for x in txt.split(":", 1)]
-
-    if admin_states[user_id] == "add_country":
-        DEFAULT_COUNTRY_MAP[name.upper()] = emoji_id
-    else:
-        DEFAULT_SERVICE_META[name.lower()] = {"emoji_id": emoji_id, "placeholder": "📱"}
-
-    save_databases()
-    del admin_states[user_id]
-    await update.message.reply_text(f"✅ Saved <b>{name}</b> with Emoji ID <code>{emoji_id}</code>.", parse_mode="HTML")
-
-# ==================== POST INIT HOOK ====================
 async def post_init(application: Application):
-    """Starts the background monitoring task using Telegram's loop."""
     asyncio.create_task(monitor_account_task(application))
 
 # ==================== MAIN ENTRY ====================
 if __name__ == "__main__":
-    load_databases()
+    load_seen()
     
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
-    
-    app.add_handler(CommandHandler("start", admin_panel))
-    app.add_handler(CommandHandler("admin", admin_panel))
-    app.add_handler(CallbackQueryHandler(admin_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, admin_message_handler))
+    app.add_handler(CommandHandler("start", start_cmd))
 
-    logger.info("🚀 IVA SMS Lightweight Bot starting...")
+    logger.info("🚀 IVA Simple Forwarder Bot Starting...")
     app.run_polling(close_loop=True)
