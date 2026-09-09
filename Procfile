@@ -1,1 +1,1 @@
-worker: python ivsms.py
+worker: python main.py
