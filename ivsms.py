@@ -1,146 +1,112 @@
-#!/usr/bin/env python3
-"""
-IVA SMS Cookie-Based Forwarder Bot
-No Login / No Captcha Needed
-"""
 import os
-import json
-import logging
-import asyncio
-import requests
-from bs4 import BeautifulSoup
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 
-# ==================== CONFIGURATION ====================
-BOT_TOKEN     = "8632025587:AAFI_QjCBOiO1LF_O3_RnGNIzIzDCXST6pk"
-GROUP_CHAT_ID = -1003919009698
+# Railway Variable থেকে টোকেন নিবে, না পেলে লোকাল টোকেন ব্যবহার করবে
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8632025587:AAFI_QjCBOiO1LF_O3_RnGNIzIzDCXST6pk")
 
-BASE_URL     = "https://www.ivasms.com"
-SMS_LIVE_URL = f"{BASE_URL}/portal/client/active_sms"
+# ইউজার প্রতি কয় ডিজিট কাটবে তা সেভ রাখার ডিকশনারি
+user_cut_digits = {}
 
-# ⚠️ এখানে আপনার ব্রাউজার থেকে কপি করা Cookies বসান
-# ব্রাউজারের Application -> Cookies ট্যাবে পাওয়া যাবে
-RAW_COOKIE_STRING = "ivasms_session=YOUR_COPIED_SESSION_COOKIE_HERE"
+# স্টার্ট বা রিস্টার্ট কমান্ড
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_cut_digits[user_id] = None  # রিসেট
+    await update.message.reply_text("apni koto digit katta cassen?")
 
-DB_SEEN_SMS = "db_seen_sms.json"
-MONITOR_INTERVAL = 3.0
+# ইউজার মেসেজ পাঠালে
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
 
-logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(message)s")
-logger = logging.getLogger()
+    # যদি ডিজিট সেট করা না থাকে
+    if user_id not in user_cut_digits or user_cut_digits[user_id] is None:
+        if text.isdigit():
+            user_cut_digits[user_id] = int(text)
+            await update.message.reply_text(
+                f"Done! Ekhon apnar number ba text file পাঠান, সামনে থেকে {text} digit কেটে দেওয়া হবে।"
+            )
+        else:
+            await update.message.reply_text("Doya kore ekta shongkhaa (digit) likhe pathan.")
+        return
 
-global_seen = set()
+    # ডিজিট সেট থাকলে নাম্বার প্রসেস করা
+    cut_count = user_cut_digits[user_id]
+    lines = text.splitlines()
+    processed_lines = []
 
-def load_seen():
-    global global_seen
-    if os.path.exists(DB_SEEN_SMS):
-        try:
-            with open(DB_SEEN_SMS, "r") as f:
-                global_seen = set(json.load(f))
-        except Exception:
-            pass
+    for line in lines:
+        clean_line = line.strip()
+        if clean_line:
+            formatted = clean_line[cut_count:]
+            # Monospace Format
+            processed_lines.append(f"`{formatted}`")
 
-def save_seen():
-    try:
-        with open(DB_SEEN_SMS, "w") as f:
-            json.dump(list(global_seen), f)
-    except Exception as e:
-        logger.error(f"DB Save Error: {e}")
+    if processed_lines:
+        result_text = "\n".join(processed_lines)
+        await update.message.reply_text(result_text, parse_mode="MarkdownV2")
+        
+        await update.message.reply_text(
+            "thank your using me ,my owner is Nahid Hasan ,if you need any help contact @nb269"
+        )
+        
+        user_cut_digits[user_id] = None
+        await update.message.reply_text("apni koto digit katta cassen?")
 
-class IVACookieSession:
-    def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Cookie': RAW_COOKIE_STRING,
-            'Referer': BASE_URL
-        })
+# txt ফাইল পাঠালে প্রসেস করার ফাংশন
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
 
-    def fetch_sms(self):
-        try:
-            res = self.session.get(SMS_LIVE_URL, timeout=15)
-            
-            # কুকি এক্সপায়ার হলে নোটিফাই করবে
-            if "login" in res.url.lower():
-                logger.error("❌ Cookie expired! Please update RAW_COOKIE_STRING.")
-                return [], "EXPIRED"
+    if user_id not in user_cut_digits or user_cut_digits[user_id] is None:
+        await update.message.reply_text("Aage bolun: apni koto digit katta cassen?")
+        return
 
-            soup = BeautifulSoup(res.text, 'html.parser')
-            rows = soup.find_all('tr')
-            results = []
-            
-            for row in rows:
-                tds = row.find_all('td')
-                if len(tds) < 2:
-                    continue
-                
-                row_data = [td.text.strip().replace('\n', ' ') for td in tds]
-                full_text = " | ".join(row_data)
-                
-                uid = str(hash(full_text))
-                results.append({
-                    'id': uid,
-                    'full_text': full_text
-                })
-            return results, "OK"
-        except Exception as e:
-            return [], str(e)
+    document = update.message.document
+    if not document.file_name.endswith('.txt'):
+        await update.message.reply_text("Doya kore shudhu .txt file pathan.")
+        return
 
-async def monitor_account_task(app: Application):
-    iva_session = IVACookieSession()
+    cut_count = user_cut_digits[user_id]
 
-    while True:
-        try:
-            new_sms_list, status = await asyncio.to_thread(iva_session.fetch_sms)
-            
-            if status == "EXPIRED":
-                try:
-                    await app.bot.send_message(
-                        chat_id=GROUP_CHAT_ID,
-                        text="⚠️ <b>IVASMS Session Cookie Expired!</b>\nPlease update the cookie in your code.",
-                        parse_mode="HTML"
-                    )
-                except Exception:
-                    pass
-                await asyncio.sleep(60) # ১ মিনিট বিরতি
-                continue
+    file = await context.bot.get_file(document.file_id)
+    file_path = f"temp_{user_id}.txt"
+    out_path = f"formatted_{document.file_name}"
 
-            for sms in new_sms_list:
-                if sms['id'] not in global_seen:
-                    global_seen.add(sms['id'])
-                    save_seen()
-                    logger.info("📩 New SMS Found! Forwarding...")
-                    
-                    text = (
-                        f"🎯 <b>SMS RECEIVED IN YOUR NUMBER!</b>\n\n"
-                        f"💬 <code>{sms['full_text']}</code>"
-                    )
-                    
-                    try:
-                        await app.bot.send_message(
-                            chat_id=GROUP_CHAT_ID,
-                            text=text,
-                            parse_mode="HTML"
-                        )
-                    except Exception as send_err:
-                        logger.error(f"Telegram Send Error: {send_err}")
+    await file.download_to_drive(file_path)
 
-        except Exception as e:
-            logger.error(f"Monitor Loop Error: {e}")
+    with open(file_path, 'r', encoding='utf-8', errors='ignore') as infile, \
+         open(out_path, 'w', encoding='utf-8') as outfile:
+        for line in infile:
+            clean_line = line.strip()
+            if clean_line:
+                outfile.write(clean_line[cut_count:] + "\n")
 
-        await asyncio.sleep(MONITOR_INTERVAL)
+    await update.message.reply_document(document=open(out_path, 'rb'))
 
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ IVA SMS Cookie Bot Active!")
+    if os.path.exists(file_path):
+        os.remove(file_path)
+    if os.path.exists(out_path):
+        os.remove(out_path)
 
-async def post_init(application: Application):
-    asyncio.create_task(monitor_account_task(application))
+    await update.message.reply_text(
+        "thank your using me ,my owner is Nahid Hasan ,if you need any help contact @nb269"
+    )
+
+    user_cut_digits[user_id] = None
+    await update.message.reply_text("apni koto digit katta cassen?")
 
 if __name__ == "__main__":
-    load_seen()
-    
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
-    app.add_handler(CommandHandler("start", start_cmd))
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    logger.info("🚀 IVA Cookie Forwarder Bot Starting...")
-    app.run_polling(close_loop=True)
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+
+    print("Bot is running...")
+    app.run_polling()
